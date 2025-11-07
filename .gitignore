@@ -1,49 +1,124 @@
-# History files
-.Rhistory
-.Rapp.history
+# Research Question:
+# Does conducting municipal audits reduce missing funds (corruption) in Argentina?
 
-# Session Data files
-.RData
-.RDataTmp
+# set working directory
+setwd("C:/Users/Emma Tergunwa/Desktop/EMADA")
+getwd()
 
-# User-specific files
-.Ruserdata
+# import libraries
+library(readr)
+library(ggplot2)
+library(tidyverse)
+library(broom)
+library(sandwich)
+library(lmtest)
+library(betareg)
+library(mice)
+library(rmarkdown)
+library(knitr)
+library(tinytex)
 
-# Example code in package build process
-*-Ex.R
+# Load and inspect the data
+olken <- read_csv("C:/Users/Emma Tergunwa/Desktop/ESTHER/olken.csv")
 
-# Output files from R CMD build
-/*.tar.gz
+head(olken)         # first few lines
+dim(olken)          # rows & columns
+str(olken)          # structure
+summary(olken)      # summary stats
+glimpse(olken)
 
-# Output files from R CMD check
-/*.Rcheck/
+# Rename columns for clarity
+# In this dataset: "pct_missing" = % missing funds; "treat_invite" = audit indicator
+olken <- olken %>%
+  rename(
+    percent_missing = pct_missing,
+    audit = treat_invite
+  )
 
-# RStudio files
-.Rproj.user/
+# (a) RANDOM SAMPLING ASSUMPTION
+# Note: This assumption cannot be tested directly in R.
+# It means each municipality was randomly drawn from the population.
+# In this dataset, audits were 'chosen' by councils, not randomly assigned.
+# This implies that, this assumption is NOT plausible.
 
-# produced vignettes
-vignettes/*.html
-vignettes/*.pdf
+#  Check the  missing data
+n_total <- nrow(olken)
+n_missing <- sum(is.na(olken$percent_missing))
+cat("Total obs:", n_total, "\nMissing percent_missing:", n_missing,
+    "(", round(100*n_missing/n_total,1), "%)\n")
 
-# OAuth2 token, see https://github.com/hadley/httr/releases/tag/v0.3
-.httr-oauth
+md.pattern(olken)   # visualize missingness pattern
 
-# knitr and R markdown default cache directories
-*_cache/
-/cache/
+#  Clean variables, ensure audit variable is numeric (0 = no, 1 = yes)
+if (!is.numeric(olken$audit)) {
+  olken <- olken %>%
+    mutate(audit = as.numeric(as.character(audit)))
+}
 
-# Temporary files created by R markdown
-*.utf8.md
-*.knit.md
+str(olken)
+table(olken$audit, useNA = "ifany")
 
-# R Environment Variables
-.Renviron
+#  Descriptive Analysis
+# to Compare mean missing funds between audited and non-audited municipalities
+cc <- olken %>% filter(!is.na(percent_missing))
+with(cc, t.test(percent_missing ~ audit))
 
-# pkgdown site
-docs/
+# Visualize distribution of percentage missing and audit
+cc %>%
+  ggplot(aes(x = factor(audit), y = percent_missing)) +
+  geom_jitter(width = 0.15, height = 0) +
+  geom_boxplot(alpha = 0.2) +
+  labs(x = "Audit (0 = No, 1 = Yes)", y = "% Missing Funds")
 
-# translation temp files
-po/*~
+#  OLS REGRESSION (Friend’s model)
+ols <- lm(percent_missing ~ audit, data = cc)
+summary(ols)
 
-# RStudio Connect folder
-rsconnect/
+# The Robust SEs (HC1)
+coeftest(ols, vcov = vcovHC(ols, type = "HC1"))
+
+# Interpretation:
+# Beta1 (audit coefficient) measures the difference in average missing funds
+# between audited and non-audited municipalities.
+# Eg: Beta1 = -15 means audited areas have 15 percentage points less missing funds.
+
+#  Scale check
+range(cc$percent_missing, na.rm = TRUE)
+
+# Convert to proportion scale (0–1) for beta regression
+if (max(cc$percent_missing, na.rm = TRUE) > 1) {
+  message("percent_missing appears scaled 0-100; converting to proportion (0-1)")
+  cc <- cc %>% mutate(p_miss = percent_missing / 100)
+} else {
+  cc <- cc %>% mutate(p_miss = percent_missing)
+}
+
+# Adjust to open interval (0,1)
+epsilon <- 1e-4
+cc <- cc %>% mutate(p_miss_adj = case_when(
+  p_miss == 0 ~ p_miss + epsilon,
+  p_miss == 1 ~ p_miss - epsilon,
+  TRUE ~ p_miss
+))
+
+# (b) ZERO CONDITIONAL MEAN ASSUMPTION
+#  MULTIPLE IMPUTATION (optional robustness)
+imp_vars <- olken %>% select(audit, percent_missing)
+imp <- mice(imp_vars, m = 5, method = "pmm", seed = 2025)
+summary(imp)
+
+fit_imp <- with(imp, lm(percent_missing ~ audit))
+pool_fit <- pool(fit_imp)
+summary(pool_fit)
+
+# (c) INTERPRETATION — DID AUDITS REDUCE MISSING FUNDS?
+# The OLS and t-test show a negative association between audit and %missing.
+# However, since audits were not randomly assigned and unobserved factors may bias results,
+# we CANNOT claim a causal effect.
+
+# Summary result:
+# (a) Random sampling: No
+# (b) Zero conditional mean: No
+# (c) Causal effect: Cannot conclude audits lowered missing funds
+# Only correlation is observed, not causation.
+
